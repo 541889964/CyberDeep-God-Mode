@@ -2,17 +2,19 @@ package com.cyber.god;
 
 import android.Manifest;
 import android.app.AlertDialog;
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.view.KeyEvent;
 import android.widget.*;
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -22,6 +24,7 @@ import java.io.FileWriter;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
     private GeckoView geckoView;
@@ -39,8 +42,10 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.POST_NOTIFICATIONS}, 2);
+            }
         }
 
         sp = getSharedPreferences("cyber_config", MODE_PRIVATE);
@@ -50,18 +55,28 @@ public class MainActivity extends AppCompatActivity {
         geckoView = findViewById(R.id.geckoView);
         tvStatus = findViewById(R.id.tvStatus);
 
-        // 启动前台保活服务
         startService(new Intent(this, CyberKeepAliveService.class));
 
         if (runtime == null) runtime = GeckoRuntime.create(this);
         session = new GeckoSession();
 
-        session.setContentDelegate(new GeckoSession.ContentDelegate() {
+        // ★ 核心：底层网络请求拦截 ★
+        session.setWebRequestDelegate(new GeckoSession.WebRequestDelegate() {
             @Override
-            public void onTitleChange(@NonNull GeckoSession session, String title) {
-                if (title != null && title.startsWith("STOLEN_HEADERS:")) {
-                    String headersJson = title.substring(15);
-                    mainHandler.post(() -> saveHeadersToDownload(headersJson));
+            public void onSendRequest(@NonNull GeckoSession geckoSession, @NonNull String uri, @NonNull Map<String, String> headers, @Nullable String body) {
+                // 只抓发往 completion 接口的 POST 请求
+                if (uri.contains("/api/v0/chat/completion") && body != null) {
+                    StringBuilder headersStr = new StringBuilder("{\n");
+                    boolean first = true;
+                    for (Map.Entry<String, String> entry : headers.entrySet()) {
+                        if (!first) headersStr.append(",\n");
+                        headersStr.append("  \"").append(entry.getKey()).append("\": \"").append(entry.getValue()).append("\"");
+                        first = false;
+                    }
+                    headersStr.append("\n}");
+
+                    // 保存抓到的 Header
+                    mainHandler.post(() -> saveHeadersToDownload(headersStr.toString()));
                 }
             }
         });
@@ -70,26 +85,28 @@ public class MainActivity extends AppCompatActivity {
         geckoView.setSession(session);
         session.loadUri("https://chat.deepseek.com");
 
-        // 延迟 3 秒注入拦截脚本
-        mainHandler.postDelayed(this::injectStealScript, 3000);
+        // 延迟注入自动发送脚本
+        mainHandler.postDelayed(this::injectAutoProbe, 3000);
 
-        // 手动抓取按钮
         Button btnManual = findViewById(R.id.btnManual);
         btnManual.setOnClickListener(v -> {
-            Toast.makeText(this, "正在手动触发抓取...", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "正在手动触发发送...", Toast.LENGTH_SHORT).show();
             String js = 
                 "let ta = document.querySelector('textarea');" +
                 "if (ta) {" +
                 "  ta.focus();" +
+                "  document.execCommand('selectAll', false, null);" +
+                "  document.execCommand('delete', false, null);" +
                 "  let setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;" +
-                "  setter.call(ta, '1（只回复好）');" +
+                "  setter.call(ta, '1（请只回复一个字：好）');" +
                 "  ta.dispatchEvent(new Event('input', { bubbles: true }));" +
-                "  setTimeout(() => ta.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true})), 300);" +
+                "  setTimeout(function() {" +
+                "    ta.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));" +
+                "  }, 300);" +
                 "}";
             session.loadUri("javascript:" + js);
         });
 
-        // 参数设置按钮
         ImageButton btnSettings = findViewById(R.id.btnSettings);
         btnSettings.setOnClickListener(v -> showSettingsDialog());
     }
@@ -97,7 +114,6 @@ public class MainActivity extends AppCompatActivity {
     private void showSettingsDialog() {
         AlertDialog.Builder builder = new AlertDialog.Builder(this);
         builder.setTitle("设置自动抓取频率");
-
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(50, 40, 50, 10);
@@ -120,7 +136,7 @@ public class MainActivity extends AppCompatActivity {
                 baseMinutes = Integer.parseInt(etBase.getText().toString());
                 offsetMinutes = Integer.parseInt(etOffset.getText().toString());
                 sp.edit().putInt("base_minutes", baseMinutes).putInt("offset_minutes", offsetMinutes).apply();
-                Toast.makeText(this, "配置已保存，正在重启探针...", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "配置已保存，正在重启...", Toast.LENGTH_SHORT).show();
                 session.loadUri("javascript:location.reload();");
             } catch (Exception e) {
                 Toast.makeText(this, "请输入有效数字", Toast.LENGTH_SHORT).show();
@@ -130,36 +146,17 @@ public class MainActivity extends AppCompatActivity {
         builder.show();
     }
 
-    private void injectStealScript() {
+    private void injectAutoProbe() {
         long baseMs = baseMinutes * 60L * 1000L;
         long offsetMs = offsetMinutes * 60L * 1000L;
 
         String js = 
             "(function() {" +
-            "  if (window.cyberHooked) return;" +
-            "  window.cyberHooked = true;" +
-            "  let origFetch = window.fetch;" +
-            "  window.fetch = async function() {" +
-            "    let url = arguments[0];" +
-            "    let options = arguments[1];" +
-            "    if (typeof url === 'string' && url.includes('/chat/completion')) {" +
-            "      if (options && options.headers) {" +
-            "        let headersObj = {};" +
-            "        if (typeof options.headers.forEach === 'function') {" +
-            "           options.headers.forEach((v, k) => { headersObj[k] = v; });" +
-            "        } else { headersObj = options.headers; }" +
-            "        let headersStr = JSON.stringify(headersObj);" +
-            "        document.title = 'STOLEN_HEADERS:' + headersStr;" +
-            "      }" +
-            "    }" +
-            "    return origFetch.apply(this, arguments);" +
-            "  };" +
+            "  if (window.cyberAutoProbe) return;" +
+            "  window.cyberAutoProbe = true;" +
             "  let probeCount = 0;" +
             "  function scheduleNext() {" +
-            "    let base = " + baseMs + ";" + 
-            "    let offset = " + offsetMs + ";" + 
-            "    let rand = (Math.random() + Math.random()) / 2;" + 
-            "    let delay = Math.max(60000, base - offset + rand * (offset * 2));" +
+            "    let delay = Math.max(60000, " + baseMs + " - " + offsetMs + " + ((Math.random() + Math.random()) / 2) * (" + offsetMs + " * 2));" +
             "    setTimeout(function() {" +
             "      let messages = document.querySelectorAll('.ds-markdown');" +
             "      if (messages.length > 8 || probeCount > 10) {" +
@@ -173,20 +170,13 @@ public class MainActivity extends AppCompatActivity {
             "        if (!cleared) { location.reload(); }" +
             "        probeCount = 0;" +
             "      }" +
-            "      let isGenerating = false;" +
-            "      let btns = document.querySelectorAll('div[role=\\'button\\'], button');" +
-            "      for(let i=0; i<btns.length; i++) {" +
-            "        let t = btns[i].innerText || '';" +
-            "        let a = btns[i].getAttribute('aria-label') || '';" +
-            "        if (t.includes('停止') || a.includes('停止')) { isGenerating = true; break; }" +
-            "      }" +
             "      let ta = document.querySelector('textarea');" +
-            "      if (ta && !ta.disabled && !isGenerating) {" +
-            "        let texts = ['1', '.', 'ok', 'hi', '在吗'];" +
-            "        let txt = texts[Math.floor(Math.random() * texts.length)] + ' （请只回复一个\\'好\\'字）';" +
+            "      if (ta && !ta.disabled) {" +
             "        ta.focus();" +
+            "        document.execCommand('selectAll', false, null);" +
+            "        document.execCommand('delete', false, null);" +
             "        let setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;" +
-            "        setter.call(ta, txt);" +
+            "        setter.call(ta, '1（请只回复一个\\'好\\'字）');" +
             "        ta.dispatchEvent(new Event('input', { bubbles: true }));" +
             "        setTimeout(function() {" +
             "          ta.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true}));" +
@@ -199,7 +189,7 @@ public class MainActivity extends AppCompatActivity {
             "  scheduleNext();" +
             "})();";
         session.loadUri("javascript:" + js);
-        tvStatus.setText("✅ 引擎已就绪");
+        tvStatus.setText("✅ 底层拦截已就绪");
     }
 
     private void saveHeadersToDownload(String headersJson) {
