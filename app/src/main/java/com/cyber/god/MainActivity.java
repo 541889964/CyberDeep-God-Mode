@@ -56,16 +56,15 @@ public class MainActivity extends AppCompatActivity {
         if (runtime == null) runtime = GeckoRuntime.create(this);
         session = new GeckoSession();
 
-        session.setMessageDelegate(new GeckoSession.MessageDelegate() {
+        session.setContentDelegate(new GeckoSession.ContentDelegate() {
             @Override
-            public void onMessage(@NonNull GeckoSession s, String uri, @NonNull WebMessage message, boolean isUserGesture, Long requestId) {
-                String data = message.data;
-                if (data.startsWith("STOLEN_HEADERS:")) {
-                    String headersJson = data.substring(15);
+            public void onTitleChange(@NonNull GeckoSession session, String title) {
+                if (title != null && title.startsWith("STOLEN_HEADERS:")) {
+                    String headersJson = title.substring(15);
                     mainHandler.post(() -> saveHeadersToDownload(headersJson));
                 }
             }
-        }, "https://chat.deepseek.com");
+        });
 
         session.open(runtime);
         geckoView.setSession(session);
@@ -150,7 +149,7 @@ public class MainActivity extends AppCompatActivity {
             "           options.headers.forEach((v, k) => { headersObj[k] = v; });" +
             "        } else { headersObj = options.headers; }" +
             "        let headersStr = JSON.stringify(headersObj);" +
-            "        window.postMessage('STOLEN_HEADERS:' + headersStr, '*');" +
+            "        document.title = 'STOLEN_HEADERS:' + headersStr;" +
             "      }" +
             "    }" +
             "    return origFetch.apply(this, arguments);" +
